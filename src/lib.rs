@@ -30,6 +30,29 @@ pub const SRC_DIR: &'static str = "src";
 // is easier for now to just have the two directories be the same.
 pub const LIT_DIR: &'static str = "src";
 
+
+pub struct Config {
+    root: PathBuf,
+    rerun_if: bool,
+}
+
+impl Config {
+
+    pub fn new() -> Config {
+        Config {
+            root: env::current_dir().unwrap(),
+            rerun_if: false,
+        }
+    }
+
+    pub fn emit_rerun_if(&mut self) -> &mut Config {
+        self.rerun_if = true;
+        self
+    }
+
+}
+
+
 #[derive(Debug)]
 pub enum Error {
     IoError(io::Error),
@@ -63,7 +86,6 @@ impl From<md2rs::Exception> for Error {
         }
     }
 }
-
 
 impl fmt::Display for Error {
     fn fmt(&self, w: &mut fmt::Formatter) -> fmt::Result {
@@ -175,14 +197,32 @@ impl Mtime for MdPath {
         }
     }
 }
-pub fn process_root() -> Result<()> {
-    let _root = try!(env::current_dir());
-    // println!("Tango is running from: {:?}", _root);
+
+pub fn process_root_with_config(config: Config) -> Result<()> {
+    let emit_rerun_if = config.rerun_if;
+    let root = config.root;
+    //println!("Tango is running from: {:?}", root);
+    env::set_current_dir(root).unwrap();
+
     let stamp_path = Path::new(STAMP);
     if stamp_path.exists() {
-        process_with_stamp(try!(File::open(stamp_path)))
+        process_with_stamp(try!(File::open(stamp_path)), emit_rerun_if)
     } else {
-        process_without_stamp()
+        process_without_stamp(emit_rerun_if)
+    }
+}
+
+
+pub fn process_root() -> Result<()> {
+    let _root = try!(env::current_dir());
+    //println!("Tango is running from: {:?}", _root);
+
+    let emit_rerun_if = false;
+    let stamp_path = Path::new(STAMP);
+    if stamp_path.exists() {
+        process_with_stamp(try!(File::open(stamp_path)), emit_rerun_if)
+    } else {
+        process_without_stamp(emit_rerun_if)
     }
 }
 
@@ -209,7 +249,8 @@ pub fn process_root() -> Result<()> {
 // (It probably wouldn't be hard to unify the two functions into a
 //  single method on the `Context`, though.)
 
-fn process_with_stamp(stamp: File) -> Result<()> {
+fn process_with_stamp(stamp: File, emit_rerun_if: bool) -> Result<()> {
+    println!("\n\nemit rerun if: {:?}\n\n", emit_rerun_if);
     if let Ok(MtimeResult::Modified(ts)) = stamp.modified() {
         println!("Rerunning tango; last recorded run was stamped: {}",
                  ts.date_fulltime_badly());
@@ -217,6 +258,7 @@ fn process_with_stamp(stamp: File) -> Result<()> {
         panic!("why are we trying to process_with_stamp when given: {:?}", stamp);
     }
     let mut c = try!(Context::new(Some(stamp)));
+    c.emit_rerun_if = emit_rerun_if;
     try!(c.gather_inputs());
     try!(c.generate_content());
     try!(c.check_input_timestamps());
@@ -225,9 +267,11 @@ fn process_with_stamp(stamp: File) -> Result<()> {
     Ok(())
 }
 
-fn process_without_stamp() -> Result<()> {
+fn process_without_stamp(emit_rerun_if: bool) -> Result<()> {
     println!("Running tango; no previously recorded run");
+    println!("\n\nemit rerun if: {:?}\n\n", emit_rerun_if);
     let mut c = try!(Context::new(None));
+    c.emit_rerun_if = emit_rerun_if;
     try!(c.gather_inputs());
     try!(c.generate_content());
     try!(c.check_input_timestamps());
@@ -242,11 +286,13 @@ struct RsPath(PathBuf);
 #[derive(Debug)]
 struct MdPath(PathBuf);
 
+
 struct Context {
     orig_stamp: Option<(File, mtime)>,
     src_inputs: Vec<Transform<RsPath, MdPath>>,
     lit_inputs: Vec<Transform<MdPath, RsPath>>,
     newest_stamp: Option<mtime>,
+    emit_rerun_if: bool,
 }
 
 trait Extensions {
@@ -274,6 +320,7 @@ impl ops::Deref for MdPath {
 }
 
 fn check_path(typename: &str, p: &Path, ext: &str, root: &str) {
+    println!("\n in check_path, the root is: {:?}", root);
     if Extensions::extension(p) != Some(ext) { panic!("{t} requires `.{ext}` extension; path: {p:?}", t=typename, ext=ext, p=p); }
     if !p.starts_with(root) { panic!("{t} must be rooted at `{root}/`; path: {p:?}", t=typename, root=root, p=p); }
 }
@@ -451,6 +498,7 @@ impl Context {
             src_inputs: Vec::new(),
             lit_inputs: Vec::new(),
             newest_stamp: None,
+            emit_rerun_if: true,
         };
         Ok(c)
     }
@@ -459,7 +507,9 @@ impl Context {
         where X: ops::Deref<Target=Path> + Mtime,
               Y: ops::Deref<Target=Path> + Mtime,
     {
+
         use self::check::ErrorKind::*;
+
 
         let t_mod = match t.target_time {
             MtimeResult::Modified(t) => t,
@@ -631,6 +681,11 @@ impl Context {
             }
             let rs = RsPath::new(p.to_path_buf());
             try!(warn_if_nonexistant(&rs));
+
+            if self.emit_rerun_if {
+                println!("cargo:rerun-if-changed={}", &rs.display());
+            }
+
             let t = try!(rs.transform());
             match self.check_transform(&t) {
                 Ok(TransformNeed::Needed) => self.push_src(t),
@@ -662,6 +717,11 @@ impl Context {
             }
             let md = MdPath::new(p.to_path_buf());
             try!(warn_if_nonexistant(&md));
+
+            if self.emit_rerun_if {
+                println!("cargo:rerun-if-changed={}", &md.display());
+            }
+
             let t = try!(md.transform());
             match self.check_transform(&t) {
                 Ok(TransformNeed::Needed) => {
@@ -797,4 +857,3 @@ fn encode_to_url(code: &str) -> String {
 
 #[cfg(test)]
 mod testing;
-
